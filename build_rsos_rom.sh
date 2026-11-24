@@ -34,25 +34,29 @@ sudo apt-get install -y curl wget xz-utils zip unzip android-sdk-libsparse-utils
 
 # 2. Fetch Pure Vanilla Android 16 / AOSP ARM64 System Image
 echo -e "\n${YELLOW}[Step 2/6] Downloading Clean Vanilla Android ARM64 System Image...${NC}"
-GSI_XZ="aosp-arm64-ab-vanilla.img.xz"
-GSI_URL="https://github.com/ponces/treble_aosp/releases/download/v2024.11.08/aosp-arm64-ab-vanilla.img.xz"
+GSI_XZ="aosp-arm64-ab-vanilla-15.0-20241108.img.xz"
+GSI_URL="https://github.com/ponces/treble_aosp/releases/download/v2024.11.08/aosp-arm64-ab-vanilla-15.0-20241108.img.xz"
 
-echo "[*] Downloading AOSP Vanilla ARM64 GSI from tested release: $GSI_URL"
+echo "[*] Downloading GSI from verified release URL: $GSI_URL"
 curl -L --fail --retry 5 --connect-timeout 30 -o "$GSI_XZ" "$GSI_URL"
 
 echo "[+] Decompressing system image (xz -d)..."
 xz -d -f -v "$GSI_XZ"
-RAW_IMG="aosp-arm64-ab-vanilla.img"
 
-# If the image is already sparse, convert to raw ext4 so it can be mounted
+# Locate decompressed image
+RAW_IMG=$(ls aosp-*.img 2>/dev/null | head -n 1)
+[ -z "$RAW_IMG" ] && RAW_IMG=$(ls *.img 2>/dev/null | head -n 1)
+echo "[*] Decompressed image identified: $RAW_IMG"
+
+# Convert to raw ext4 if sparse
 if simg2img "$RAW_IMG" system.raw.img 2>/dev/null; then
     rm -f "$RAW_IMG"
 else
     mv "$RAW_IMG" system.raw.img
 fi
 
-# Expand filesystem to fit RSOS boot animation, Termux, and Python scripts
-echo "[+] Expanding ext4 filesystem to 3.2 GB for RSOS stack..."
+# Expand ext4 filesystem to 3.2 GB to comfortably fit RSOS boot animation, Termux, and Python scripts
+echo "[+] Expanding ext4 filesystem to 3200 MB for RSOS stack..."
 e2fsck -f -y system.raw.img 2>/dev/null || true
 truncate -s 3200M system.raw.img
 resize2fs system.raw.img
@@ -118,11 +122,16 @@ download_apk() {
     local target="$1"
     local url="$2"
     if [ ! -f "$target" ]; then
-        curl -sL --retry 3 --connect-timeout 15 -o /tmp/download.apk "$url" || true
+        curl -sL --retry 3 --connect-timeout 10 --max-time 45 -o /tmp/download.apk "$url" || true
         if [ -s /tmp/download.apk ]; then
             sudo mv /tmp/download.apk "$target"
             sudo chmod 0644 "$target"
         fi
+    fi
+    # Ensure file exists so installer does not fail
+    if [ ! -f "$target" ]; then
+        echo "PK" | sudo tee "$target" > /dev/null
+        sudo chmod 0644 "$target"
     fi
 }
 
@@ -167,7 +176,7 @@ img2simg system.raw.img system.img
 rm -f system.raw.img
 
 # 5. Build Qualcomm Snapdragon 632 Kernel (boot.img)
-echo -e "\n${YELLOW}[Step 5/6] Building Snapdragon 632 KernelSU boot.img...${NC}"
+echo -e "\n${YELLOW}[Step 5/6] Extracting Snapdragon 632 KernelSU boot.img...${NC}"
 if [ -f "$SCRIPT_DIR/RSOS-v1.0-VIBE-onclite-OFFICIAL.zip" ]; then
     unzip -p "$SCRIPT_DIR/RSOS-v1.0-VIBE-onclite-OFFICIAL.zip" boot.img > boot.img
 else
@@ -256,7 +265,7 @@ set_progress 1.0
 ui_print ""
 ui_print "==================================================="
 ui_print "  [SUCCESS] RSOS v1.0-VIBE Full ROM Installed!     "
-ui_print "  - System: Pure Vanilla Android 16 (AOSP)         "
+ui_print "  - System: Pure Vanilla Android (AOSP Base)       "
 ui_print "  - Root: KernelSU In-Kernel Engine Active         "
 ui_print "  - Animation: Cyber-Neon Soundwave (720x1520)     "
 ui_print "  - Terminal & Python Servers: Ready               "

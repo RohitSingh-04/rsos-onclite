@@ -8,7 +8,7 @@
 set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WORK_DIR="/tmp/rsos_build_workspace"
+WORK_DIR="${GITHUB_WORKSPACE:-/tmp}/build_workspace"
 OUTPUT_DIR="${1:-$GITHUB_WORKSPACE/output}"
 
 RED='\033[0;31m'
@@ -42,6 +42,7 @@ curl -L --fail --retry 5 --connect-timeout 30 -o "$GSI_XZ" "$GSI_URL"
 
 echo "[+] Decompressing system image (xz -d)..."
 xz -d -f -v "$GSI_XZ"
+rm -f "$GSI_XZ"
 
 # Locate decompressed image
 RAW_IMG=$(ls aosp-*.img 2>/dev/null | head -n 1)
@@ -55,17 +56,52 @@ else
     mv "$RAW_IMG" system.raw.img
 fi
 
-# Expand ext4 filesystem to 3.2 GB to comfortably fit RSOS boot animation, Termux, and Python scripts
-echo "[+] Expanding ext4 filesystem to 3200 MB for RSOS stack..."
-e2fsck -f -y system.raw.img 2>/dev/null || true
-truncate -s 3200M system.raw.img
+# Expand ext4 filesystem container to 3000 MB (fits safely inside onclite 3.5GB system partition)
+echo "[+] Expanding ext4 filesystem container to 3000 MB..."
+truncate -s 3000M system.raw.img
+
+# Filesystem check before resize
+echo "[+] Checking filesystem before unshare/resize..."
+e2fsck -f -y system.raw.img || true
+
+# Resize ext4 filesystem to fill the 3000 MB container
+echo "[+] Resizing ext4 filesystem to 3000 MB..."
 resize2fs system.raw.img
+
+# CRITICAL FIX: Modern Android GSIs use RO_COMPAT_SHARED_BLOCKS (block deduplication).
+# The Linux kernel strictly refuses to mount filesystems with shared_blocks as read-write (returns exit code 32).
+# We unshare the deduplicated blocks so standard Linux ext4 drivers allow read-write loop mounting:
+echo "[+] Unsharing deduplicated blocks (e2fsck -E unshare_blocks)..."
+e2fsck -f -y -E unshare_blocks system.raw.img || true
+
+# Post-unshare verification check
+e2fsck -f -y system.raw.img || true
 
 # 3. Mount System Image & Inject RSOS Enhancements
 echo -e "\n${YELLOW}[Step 3/6] Injecting RSOS Layer (Boot Animation, KernelSU, Termux, Server Tuning)...${NC}"
 MOUNT_DIR="/mnt/rsos_system"
 sudo mkdir -p "$MOUNT_DIR"
-sudo mount -o loop,rw system.raw.img "$MOUNT_DIR"
+
+# Clean any existing mount
+sudo umount -f "$MOUNT_DIR" 2>/dev/null || true
+
+# Attach to loop device explicitly
+LOOPDEV=$(sudo losetup -f --show system.raw.img)
+echo "[*] Attached image to loop device: $LOOPDEV"
+
+# Mount ext4 rw
+echo "[+] Mounting $LOOPDEV to $MOUNT_DIR..."
+if ! sudo mount -t ext4 -o rw "$LOOPDEV" "$MOUNT_DIR"; then
+    echo "[-] Direct loop mount failed, checking dmesg..."
+    sudo dmesg | tail -n 25
+    echo "[*] Attempting fallback mount without explicit type..."
+    sudo mount -o loop,rw system.raw.img "$MOUNT_DIR" || {
+        echo "[-] All mount methods failed! Kernel log:"
+        sudo dmesg | tail -n 40
+        exit 1
+    }
+fi
+echo "[+] System partition mounted successfully at $MOUNT_DIR"
 
 # Locate system root (handles both A/B system-as-root and standard layout)
 if [ -d "$MOUNT_DIR/system" ]; then
@@ -76,12 +112,14 @@ fi
 
 # A. Inject RSOS Cyber-Neon Boot Animation (720x1520 @ 30 FPS)
 echo "[+] Injecting RSOS 720x1520 Cyber-Neon Boot Animation..."
-sudo mkdir -p "$SYS/media" "$SYS/../product/media" 2>/dev/null || true
+sudo mkdir -p "$SYS/media" "$SYS/product/media" "$MOUNT_DIR/product/media" 2>/dev/null || true
 if [ -f "$SCRIPT_DIR/device_overlay/bootanimation/bootanimation.zip" ]; then
     sudo cp -f "$SCRIPT_DIR/device_overlay/bootanimation/bootanimation.zip" "$SYS/media/bootanimation.zip"
-    sudo cp -f "$SCRIPT_DIR/device_overlay/bootanimation/bootanimation.zip" "$SYS/../product/media/bootanimation.zip" 2>/dev/null || true
+    sudo cp -f "$SCRIPT_DIR/device_overlay/bootanimation/bootanimation.zip" "$SYS/product/media/bootanimation.zip" 2>/dev/null || true
+    sudo cp -f "$SCRIPT_DIR/device_overlay/bootanimation/bootanimation.zip" "$MOUNT_DIR/product/media/bootanimation.zip" 2>/dev/null || true
     sudo chmod 0644 "$SYS/media/bootanimation.zip"
-    sudo chmod 0644 "$SYS/../product/media/bootanimation.zip" 2>/dev/null || true
+    sudo chmod 0644 "$SYS/product/media/bootanimation.zip" 2>/dev/null || true
+    echo "    [SUCCESS] Boot animation deployed to system media."
 fi
 
 # B. Inject RSOS System Properties & 3GB RAM Server Profiles
@@ -116,29 +154,31 @@ sudo chmod 0644 "$SYS/build.prop"
 
 # C. Inject Pre-Installed Terminal (Termux) & KernelSU Root App
 echo "[+] Pre-installing Termux Terminal & KernelSU Root Manager..."
-sudo mkdir -p "$SYS/app/Termux" "$SYS/app/KernelSU" "$SYS/app/TermuxBoot" "$SYS/app/TermuxAPI" "$SYS/xbin" "$SYS/etc/init"
+sudo mkdir -p "$SYS/app/Termux" "$SYS/app/KernelSU" "$SYS/app/TermuxBoot" "$SYS/app/TermuxAPI" "$SYS/xbin" "$SYS/bin" "$SYS/etc/init"
 
 download_apk() {
     local target="$1"
     local url="$2"
-    if [ ! -f "$target" ]; then
-        curl -sL --retry 3 --connect-timeout 10 --max-time 45 -o /tmp/download.apk "$url" || true
+    echo "[*] Downloading: $url"
+    rm -f /tmp/download.apk
+    if curl -sL --fail --retry 3 --connect-timeout 15 --max-time 60 -o /tmp/download.apk "$url"; then
         if [ -s /tmp/download.apk ]; then
-            sudo mv /tmp/download.apk "$target"
+            sudo cp -f /tmp/download.apk "$target"
             sudo chmod 0644 "$target"
+            echo "    [SUCCESS] Installed: $target ($(du -h /tmp/download.apk | cut -f1))"
+            rm -f /tmp/download.apk
+            return 0
         fi
     fi
-    # Ensure file exists so installer does not fail
-    if [ ! -f "$target" ]; then
-        echo "PK" | sudo tee "$target" > /dev/null
-        sudo chmod 0644 "$target"
-    fi
+    echo "    [WARN] Direct download failed, creating placeholder: $target"
+    echo "PK" | sudo tee "$target" > /dev/null
+    sudo chmod 0644 "$target"
 }
 
 download_apk "$SYS/app/Termux/Termux.apk" "https://github.com/termux/termux-app/releases/download/v0.118.1/termux-app_v0.118.1+github-debug_arm64-v8a.apk"
-download_apk "$SYS/app/KernelSU/KernelSU.apk" "https://github.com/tiann/KernelSU/releases/download/v0.9.5/KernelSU_v0.9.5_11871-release.apk"
-download_apk "$SYS/app/TermuxBoot/TermuxBoot.apk" "https://github.com/termux/termux-boot/releases/download/v0.8.1/termux-boot-v0.8.1.apk"
-download_apk "$SYS/app/TermuxAPI/TermuxAPI.apk" "https://github.com/termux/termux-api/releases/download/v0.51/termux-api-v0.51.apk"
+download_apk "$SYS/app/KernelSU/KernelSU.apk" "https://github.com/tiann/KernelSU/releases/download/v3.3.1/KernelSU_v3.3.1_32680-release.apk"
+download_apk "$SYS/app/TermuxBoot/TermuxBoot.apk" "https://github.com/termux/termux-boot/releases/download/v0.8.1/termux-boot-app_v0.8.1%2Bgithub.debug.apk"
+download_apk "$SYS/app/TermuxAPI/TermuxAPI.apk" "https://github.com/termux/termux-api/releases/download/v0.53.0/termux-api-app_v0.53.0%2Bgithub.debug.apk"
 
 # D. Inject su binary wrapper
 cat << 'EOF' | sudo tee "$SYS/xbin/su" > /dev/null
@@ -152,6 +192,8 @@ else
 fi
 EOF
 sudo chmod 4755 "$SYS/xbin/su"
+sudo cp -f "$SYS/xbin/su" "$SYS/bin/su" 2>/dev/null || true
+sudo chmod 4755 "$SYS/bin/su" 2>/dev/null || true
 
 # E. Inject init.onclite.server.rc (ZRAM 2.5GB and server keepalive)
 if [ -f "$SCRIPT_DIR/device_overlay/init.onclite.server.rc" ]; then
@@ -167,13 +209,15 @@ sudo chmod -R 0755 "$SYS/etc/rsos_server"
 # Unmount cleanly
 echo "[+] Unmounting and verifying system filesystem..."
 sync
-sudo umount "$MOUNT_DIR"
-e2fsck -f -y system.raw.img 2>/dev/null || true
+sudo umount "$MOUNT_DIR" || sudo umount -l "$MOUNT_DIR" || true
+if [ -n "$LOOPDEV" ] && [ -e "$LOOPDEV" ]; then
+    sudo losetup -d "$LOOPDEV" 2>/dev/null || true
+fi
+e2fsck -f -y system.raw.img || true
 
-# 4. Convert to Android Sparse Image
-echo -e "\n${YELLOW}[Step 4/6] Compressing System Image to Sparse Format...${NC}"
-img2simg system.raw.img system.img
-rm -f system.raw.img
+# 4. Prepare System Image for ROM packaging
+echo -e "\n${YELLOW}[Step 4/6] Preparing Final System Image...${NC}"
+mv system.raw.img system.img
 
 # 5. Build Qualcomm Snapdragon 632 Kernel (boot.img)
 echo -e "\n${YELLOW}[Step 5/6] Extracting Snapdragon 632 KernelSU boot.img...${NC}"
@@ -184,6 +228,12 @@ else
     unzip -p "$SCRIPT_DIR/RSOS-v1.0-VIBE-onclite-OFFICIAL.zip" boot.img > boot.img
 fi
 
+if [ ! -s boot.img ]; then
+    echo "[-] Error: boot.img extraction failed!"
+    exit 1
+fi
+echo "[+] Kernel boot.img verified ($(du -h boot.img | cut -f1))"
+
 # 6. Assemble True 1.2 GB Flashable Recovery ZIP
 echo -e "\n${YELLOW}[Step 6/6] Packaging Final ~1.2 GB Recovery ROM ZIP...${NC}"
 ROM_ZIP_NAME="RSOS-v1.0-VIBE-onclite-FULL-ROM.zip"
@@ -191,7 +241,7 @@ ROM_ZIP_PATH="$OUTPUT_DIR/$ROM_ZIP_NAME"
 rm -f "$ROM_ZIP_PATH"
 
 # Build Recovery Installer Scripts
-mkdir -p META-INF/com/google/android
+mkdir -p META-INF/com/google/android META-INF/com/android
 
 cat << 'EOF' > META-INF/com/google/android/update-binary
 #!/sbin/sh
@@ -231,30 +281,15 @@ if [ -n "$BOOTDEV" ] && [ -e "$BOOTDEV" ]; then
 fi
 
 set_progress 0.4
-ui_print "[+] Flashing Full RSOS System Image (system.img ~1 GB)..."
+ui_print "[+] Flashing Full RSOS System Image (system.img)..."
 SYSDEV="/dev/block/bootdevice/by-name/system"
 [ ! -e "$SYSDEV" ] && SYSDEV=$(find /dev/block -name "system" 2>/dev/null | head -n 1)
-
-# Handle dynamic super partition if present
-if [ -e "/dev/block/mapper/system" ]; then
-    SYSDEV="/dev/block/mapper/system"
-fi
+[ -e "/dev/block/mapper/system" ] && SYSDEV="/dev/block/mapper/system"
 
 if [ -n "$SYSDEV" ] && [ -e "$SYSDEV" ]; then
     ui_print "    Writing system image to: $SYSDEV"
     unzip -p "$ZIPFILE" system.img > "$SYSDEV"
     ui_print "    System image flash verified."
-else
-    # File-level extraction fallback if block device is masked
-    ui_print "    Mounting /system for payload deployment..."
-    mount /system 2>/dev/null || mount /system_root 2>/dev/null || true
-    unzip -o -q "$ZIPFILE" system.img -d /tmp/
-    simg2img /tmp/system.img /tmp/system.raw 2>/dev/null || mv /tmp/system.img /tmp/system.raw
-    mkdir -p /tmp/sysmount
-    mount -o loop,ro /tmp/system.raw /tmp/sysmount
-    cp -a /tmp/sysmount/* /system/ 2>/dev/null || cp -a /tmp/sysmount/* /system_root/ 2>/dev/null || true
-    umount /tmp/sysmount 2>/dev/null || true
-    rm -rf /tmp/system.raw /tmp/sysmount
 fi
 
 set_progress 0.9

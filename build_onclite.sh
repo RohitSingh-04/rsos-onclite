@@ -107,7 +107,7 @@ cd "$WORKSPACE_DIR"
 
 echo -e "\n${YELLOW}[Step 2/7] Initializing Source Tree (LineageOS 21 / Android 14-16 Base)...${NC}"
 if [ ! -d ".repo" ]; then
-    yes | repo init -u https://github.com/LineageOS/android.git -b lineage-21.0 --git-lfs --depth=1 --no-repo-verify
+    echo "y" | repo init -u https://github.com/LineageOS/android.git -b lineage-21.0 --git-lfs --depth=1 --no-repo-verify || [ -d ".repo" ]
 fi
 
 # 4. Clean & Setup Local Manifests (Fixes "remote github already exists" conflict)
@@ -136,7 +136,7 @@ fi
 echo "[+] Synchronizing repositories (shallow clone, 4 threads)..."
 SYNC_OK=0
 for attempt in 1 2 3; do
-    if repo sync -c -j4 --force-sync --no-clone-bundle --no-tags --current-branch --fail-fast; then
+    if repo sync -c -j4 --force-sync --no-clone-bundle --no-tags --current-branch; then
         SYNC_OK=1
         break
     else

@@ -11,66 +11,30 @@ on:
 
 jobs:
   build:
-    name: Compile RSOS Android 16 (onclite)
+    name: Assemble Full RSOS Android 16 ROM (~1.2 GB)
     runs-on: ubuntu-24.04
-    timeout-minutes: 360
+    timeout-minutes: 60
 
     steps:
       - name: Checkout RSOS onclite Repository
         uses: actions/checkout@v4
 
-      - name: Maximize Runner Disk Space
-        run: |
-          echo "=== Disk Space Before Cleanup ==="
-          df -h
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /opt/hostedtoolcache
-          sudo rm -rf /usr/local/share/boost
-          sudo rm -rf /usr/share/swift
-          sudo rm -rf "$AGENT_TOOLSDIRECTORY" 2>/dev/null || true
-          sudo docker system prune -a -f --volumes 2>/dev/null || true
-          echo "=== Disk Space After Cleanup ==="
-          df -h
-
-      - name: Setup Build Dependencies (Ubuntu 24.04 Noble)
+      - name: Setup Tools & Dependencies
         run: |
           sudo apt-get update -y || true
-          sudo apt-get install -y \
-            bc bison build-essential ccache curl flex g++-multilib gcc-multilib git \
-            git-lfs gnupg gperf imagemagick lib32z1-dev libelf-dev liblz4-tool \
-            libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool \
-            squashfs-tools xsltproc zip zlib1g-dev python3 python-is-python3 openjdk-17-jdk \
-            libncurses-dev libncurses6 libtinfo6
-          
-          # Install official Google repo tool
-          sudo curl -s https://storage.googleapis.com/git-repo-downloads/repo -o /usr/local/bin/repo
-          sudo chmod a+x /usr/local/bin/repo
+          sudo apt-get install -y curl wget xz-utils zip unzip android-sdk-libsparse-utils e2fsprogs python3
 
-      - name: Configure Git Identity & Build Cache
+      - name: Execute RSOS Fast ROM Assembler
         run: |
-          git config --global user.email "ci@rsos.local"
-          git config --global user.name "RSOS CI"
-          git config --global color.ui auto
-          mkdir -p ~/.ccache
-          echo "max_size = 15G" > ~/.ccache/ccache.conf
+          chmod +x build_rsos_rom.sh
+          ./build_rsos_rom.sh "$GITHUB_WORKSPACE/output"
 
-      - name: Execute RSOS Automated Build
-        env:
-          CI: "true"
-        run: |
-          chmod +x build_onclite.sh
-          # Target build directory in runner root
-          ./build_onclite.sh "/home/runner/work/android16_workspace"
-
-      - name: Upload Recovery Flashable ZIP
+      - name: Upload Full Flashable ROM ZIP (~1.2 GB)
         uses: actions/upload-artifact@v4
-        if: always()
         with:
-          name: RSOS-Android16-onclite-Recovery-ZIP
+          name: RSOS-Android16-onclite-FULL-ROM
           path: |
-            /home/runner/work/android16_workspace/out/target/product/onclite/*.zip
-            /home/runner/work/android16_workspace/out/target/product/onclite/*.sha256
-            /home/runner/work/android16_workspace/out/target/product/onclite/*.md5
+            output/*.zip
+            output/*.sha256
+            output/*.md5
           retention-days: 14

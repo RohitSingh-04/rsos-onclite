@@ -1,0 +1,16 @@
+# Local Build Artifacts
+out/
+android16_workspace/
+.repo/
+*.img
+/swapfile_android
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.log
+
+# Temporary and extraction files
+tmp/
+temp/

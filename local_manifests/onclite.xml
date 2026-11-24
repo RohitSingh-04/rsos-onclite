@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<manifest>
+    <!-- Custom Namespaced Remote (Prevents duplicate remote collision) -->
+    <remote name="rsos-gh" fetch="https://github.com" />
+
+    <!-- Device Tree for Xiaomi Redmi Y3 / Redmi 7 (onclite / onc) -->
+    <project path="device/xiaomi/onclite" name="LineageOS/android_device_xiaomi_onclite" remote="rsos-gh" revision="lineage-21.0" />
+    
+    <!-- Vendor Blobs Tree -->
+    <project path="vendor/xiaomi/onclite" name="onclite/android_vendor_xiaomi_onclite" remote="rsos-gh" revision="lineage-21.0" />
+
+    <!-- Kernel Tree (Qualcomm Snapdragon 632 / msm8953) -->
+    <project path="kernel/xiaomi/onclite" name="LineageOS/android_kernel_xiaomi_onclite" remote="rsos-gh" revision="lineage-21.0" />
+
+    <!-- In-Kernel Root Engine (KernelSU) -->
+    <project path="kernel/xiaomi/onclite/KernelSU" name="tiann/KernelSU" remote="rsos-gh" revision="main" />
+</manifest>
